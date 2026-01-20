@@ -2,6 +2,8 @@
 
 A lightweight, Python-based tool to share your movie collection over your local Wi-Fi network with a Netflix-style interface.
 
+![Screenshot](https://github.com/user-attachments/assets/bb18ea20-3d80-4ffb-b03f-600e461e25ba)
+
 ![Screenshot](https://github.com/user-attachments/assets/2b0f5a53-a813-4634-9947-e75d54547377)
 
 ![Screenshot](https://github.com/user-attachments/assets/7ecf64fe-1508-4085-a073-c7a3686a991b)
