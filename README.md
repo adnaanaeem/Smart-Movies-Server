@@ -1,23 +1,39 @@
-# 🎬 Smart Movies Server
+# 🎬 Smart Media Server (v2.0)
 
-A lightweight, Python-based tool to share your movie collection over your local Wi-Fi network with a Netflix-style interface.
+Turn your PC into a local **Netflix-style Streaming Service**.  
+Select a folder, start the server, and watch your movies on any device on your Wi-Fi (Phone, TV, Tablet) with a beautiful dark interface.
 
-![Screenshot](https://github.com/user-attachments/assets/bb18ea20-3d80-4ffb-b03f-600e461e25ba)
 
-![Screenshot](https://github.com/user-attachments/assets/2b0f5a53-a813-4634-9947-e75d54547377)
+
+![Screenshot](https://github.com/user-attachments/assets/0f8b61e4-a86f-4597-a700-be44e7805702)
+
+![Screenshot](https://github.com/user-attachments/assets/f7f9342e-631c-4094-a5ce-afba595aa075)
 
 ![Screenshot](https://github.com/user-attachments/assets/7ecf64fe-1508-4085-a073-c7a3686a991b)
 
-## ✨ Features
-- **One-Click Sharing:** Select a folder and start the server.
+## ✨ New in v2.0 (The "Pro" Update)
+- **🖼️ Auto-Metadata:** Automatically fetches Movie Posters, Titles, and Ratings from TMDB.
+- **❤️ Favorites System:** "My List" feature to save movies you want to watch.
+- **🔐 PIN Security:** Optional PIN protection to keep your library private.
+- **🖥️ Modern Control Panel:** Sleek Dark-Mode Windows UI with System Tray support.
+- **👀 Live Client Monitor:** See who is connected to your server in real-time.
+- **📁 Smart Folders:** Recognizes TV Show folders and applies special badges.
+
+## ⚡ Core Features
 - **Auto-Discovery:** Generates a QR Code and IP link automatically.
-- **Web Interface:** Beautiful dark-mode UI for friends to browse movies.
-- **Memory Resume:** Remembers where you left off (Resume Playback).
-- **Dual Audio Support:** "Open in VLC" button for switching audio tracks.
-- **Zip Download:** Download entire folders/seasons as a .zip file.
+- **Resume Playback:** Remembers exactly where you left off on any device.
+- **Dual Audio Support:** "Open in VLC" button for changing audio tracks/subtitles.
+- **Batch Download:** Zip & Download entire seasons/folders with a progress bar.
+- **Search & Sort:** Filter by Name, Date, Size, or Favorites.
 
 ## 🚀 Download
 [Download the latest .exe here](https://github.com/adnaanaeem/Smart-Movies-Server/releases/latest)
+
+## 🔮 Upcoming Features (Roadmap)
+- [ ] **Genre Filtering** (Action, Comedy, Sci-Fi filters).
+- [ ] **Watch Party** (Sync video playback with friends).
+- [ ] **Remote Access** (Share link over the internet).
+- [ ] **User Accounts** (Separate history for different users).
 
 ## 🛠️ How to Run from Source
 1. **Install Python 3.x**
@@ -40,7 +56,7 @@ A lightweight, Python-based tool to share your movie collection over your local 
 
 ##📦 How to Build EXE
 
-```pyinstaller --noconsole --onefile --icon=static/favicon.ico --name="Smart Movies Server" --add-data "templates;templates" --add-data "static;static" movies_server.py```
+```pyinstaller --noconsole --onefile --icon=static/favicon.ico --name="SmartMovieServer" --add-data "templates;templates" --add-data "static;static" --collect-all customtkinter movies_server.py```
 
 📄 License
 This project is open-source under the MIT License.
