@@ -1,5 +1,4 @@
 import os
-import sys
 import socket
 import threading
 import time
@@ -8,23 +7,18 @@ import urllib.parse
 import zipfile
 import uuid
 import tempfile
+from functools import wraps # NEW: To create the login guard
 from PIL import Image, ImageTk
-from flask import Flask, render_template, send_from_directory, send_file, abort, request, jsonify, after_this_request
+from flask import Flask, render_template, send_from_directory, send_file, abort, request, jsonify, after_this_request, session, redirect, url_for
 import tkinter as tk
 from tkinter import filedialog
 
-# CORRECT PATH HANDLING FOR EXE
-if getattr(sys, 'frozen', False):
-    # If running as EXE, use the temporary internal folder
-    template_folder = os.path.join(sys._MEIPASS, 'templates')
-    static_folder = os.path.join(sys._MEIPASS, 'static')
-    app = Flask(__name__, template_folder=template_folder, static_folder=static_folder)
-else:
-    # If running as script, use normal folders
-    app = Flask(__name__)
+app = Flask(__name__)
+app.secret_key = os.urandom(24) # NEW: Required for Sessions to work
 PORT = 8000
 SHARED_DIR = ""
 SERVER_URL = ""
+SERVER_PIN = "" # Stores the PIN set by the user
 
 # --- ZIP PROGRESS STATE ---
 ZIP_JOBS = {}
@@ -33,6 +27,16 @@ def get_size_format(b):
     for unit in ["", "K", "M", "G", "T"]:
         if b < 1024: return f"{b:.1f}{unit}B"
         b /= 1024
+
+# --- LOGIN DECORATOR (The Guard) ---
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # If a PIN is set AND user is not logged in
+        if SERVER_PIN and not session.get('authenticated'):
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
 
 # --- BACKGROUND ZIP TASK ---
 def background_zip_task(job_id, source_dir, temp_dir):
@@ -71,15 +75,28 @@ def background_zip_task(job_id, source_dir, temp_dir):
         ZIP_JOBS[job_id]['progress'] = 100
         ZIP_JOBS[job_id]['status'] = 'ready'
         ZIP_JOBS[job_id]['filepath'] = zip_path
-
     except Exception as e:
         print(f"Zip Error: {e}")
         ZIP_JOBS[job_id]['status'] = 'error'
 
 # --- FLASK ROUTES ---
+
+# NEW: Login Route
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        user_pin = request.form.get('pin')
+        if user_pin == SERVER_PIN:
+            session['authenticated'] = True
+            return redirect(url_for('index'))
+        else:
+            return render_template('login.html', error="Incorrect PIN")
+    return render_template('login.html')
+
 @app.route('/')
 @app.route('/view/')
 @app.route('/view/<path:subpath>')
+@login_required  # PROTECTED
 def index(subpath=""):
     global SHARED_DIR
     if not SHARED_DIR: return "Select folder in the app first."
@@ -118,6 +135,7 @@ def index(subpath=""):
                            parent_path=os.path.dirname(subpath).replace("\\", "/"), sort_by=sort_by)
 
 @app.route('/play/<path:filepath>')
+@login_required # PROTECTED
 def play(filepath):
     filename = os.path.basename(filepath)
     directory = os.path.dirname(os.path.join(SHARED_DIR, filepath))
@@ -143,6 +161,7 @@ def play(filepath):
                            subtitles=subtitles, vlc_link=vlc_protocol_link, stream_url=stream_url)
 
 @app.route('/download/<path:filename>')
+@login_required # PROTECTED
 def download(filename):
     response = send_from_directory(SHARED_DIR, filename)
     if filename.lower().endswith('.vtt'): response.headers['Content-Type'] = 'text/vtt'
@@ -150,6 +169,7 @@ def download(filename):
     return response
 
 @app.route('/api/start_zip/<path:subpath>')
+@login_required # PROTECTED
 def start_zip(subpath):
     target_dir = os.path.join(SHARED_DIR, subpath)
     if not os.path.exists(target_dir): return jsonify({"error": "Path not found"}), 404
@@ -160,12 +180,14 @@ def start_zip(subpath):
     return jsonify({"job_id": job_id})
 
 @app.route('/api/zip_status/<job_id>')
+# Not strictly required to protect status, but safer
 def zip_status(job_id):
     job = ZIP_JOBS.get(job_id)
     if not job: return jsonify({"error": "Job not found"}), 404
     return jsonify(job)
 
 @app.route('/api/download_zip_result/<job_id>')
+@login_required # PROTECTED
 def download_zip_result(job_id):
     job = ZIP_JOBS.get(job_id)
     if not job or job['status'] != 'ready': return abort(404)
@@ -179,12 +201,12 @@ def download_zip_result(job_id):
         return response
     return send_file(file_path, as_attachment=True)
 
-# --- GUI APP (NO POPUPS) ---
+# --- GUI APP ---
 class MovieApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Movie Server Control")
-        self.root.geometry("500x650")
+        self.root.geometry("500x700") # Increased height for PIN box
         self.root.resizable(False, False)
         
         icon_path = os.path.join("static", "favicon.ico")
@@ -205,6 +227,13 @@ class MovieApp:
         self.lbl_path = tk.Label(self.frame_controls, text="No folder selected", fg="gray", font=("Arial", 8), wraplength=400)
         self.lbl_path.pack(pady=5)
 
+        # --- NEW PIN ENTRY ---
+        tk.Label(self.frame_controls, text="Step 2: Set PIN (Optional)", font=("Arial", 10)).pack(pady=(15, 5))
+        self.pin_entry = tk.Entry(self.frame_controls, show="*", justify="center", width=15, font=("Arial", 12))
+        self.pin_entry.pack()
+        tk.Label(self.frame_controls, text="(Leave empty for no password)", fg="gray", font=("Arial", 8)).pack()
+        # ---------------------
+
         self.btn_start = tk.Button(root, text="▶ START SERVER", state="disabled", command=self.run_s, bg="#28a745", fg="white", font=("Arial", 11, "bold"), width=20, height=2)
         self.btn_start.pack(pady=10)
 
@@ -218,7 +247,6 @@ class MovieApp:
         self.qr_label = tk.Label(root)
         self.qr_label.pack(pady=10)
         
-        # --- NEW STATUS LABEL (Replaces Popups) ---
         self.lbl_status = tk.Label(root, text="Waiting to start...", fg="#888", font=("Arial", 10, "italic"))
         self.lbl_status.pack(side="bottom", pady=20)
 
@@ -229,16 +257,19 @@ class MovieApp:
             SHARED_DIR = os.path.abspath(path)
             self.lbl_path.config(text=SHARED_DIR, fg="black")
             self.btn_start.config(state="normal")
-            self.lbl_status.config(text="Folder selected. Ready to start.", fg="#007bff")
+            self.lbl_status.config(text="Folder selected.", fg="#007bff")
 
     def copy_link(self):
         self.root.clipboard_clear()
         self.root.clipboard_append(SERVER_URL)
-        # Update label instead of Popup
         self.lbl_status.config(text="✅ Link copied to clipboard!", fg="#28a745")
 
     def run_s(self):
-        global SERVER_URL
+        global SERVER_URL, SERVER_PIN
+        
+        # Capture PIN
+        SERVER_PIN = self.pin_entry.get().strip()
+
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try: s.connect(("8.8.8.8", 80)); ip = s.getsockname()[0]
         except: ip = "127.0.0.1"
@@ -249,6 +280,7 @@ class MovieApp:
         
         self.btn_start.config(text="SERVER RUNNING", state="disabled", bg="#555")
         self.btn_select.config(state="disabled")
+        self.pin_entry.config(state="disabled") # Lock pin entry
         self.btn_copy.config(state="normal")
         self.txt_display.config(state="normal")
         self.txt_display.delete("1.0", tk.END)
@@ -262,8 +294,9 @@ class MovieApp:
         self.tk_qr_image = ImageTk.PhotoImage(img)
         self.qr_label.config(image=self.tk_qr_image)
         
-        # Update label instead of Popup
-        self.lbl_status.config(text="✅ Server is Live! Scan QR or Copy Link.", fg="#28a745")
+        status_msg = "✅ Server Live!"
+        if SERVER_PIN: status_msg += f" (PIN: {SERVER_PIN})"
+        self.lbl_status.config(text=status_msg, fg="#28a745")
 
 if __name__ == "__main__":
     root = tk.Tk()
