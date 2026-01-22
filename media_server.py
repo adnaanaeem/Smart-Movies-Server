@@ -24,18 +24,15 @@ from pystray import MenuItem as item
 
 from flask import Flask, render_template, send_from_directory, send_file, abort, request, jsonify, after_this_request, session, redirect, url_for
 
-# --- 1. CORRECT APP INITIALIZATION ---
+# --- APP SETUP ---
 if getattr(sys, 'frozen', False):
-    # If running as EXE, use internal paths
     template_folder = os.path.join(sys._MEIPASS, 'templates')
     static_folder = os.path.join(sys._MEIPASS, 'static')
     app = Flask(__name__, template_folder=template_folder, static_folder=static_folder)
 else:
-    # If running as Script, use normal paths
     app = Flask(__name__)
 
-# --- 2. SET SECRET KEY AFTER INITIALIZATION ---
-app.secret_key = os.urandom(24) # <--- THIS FIXES THE ERROR
+app.secret_key = os.urandom(24)
 
 # --- CONFIGURATION ---
 PORT = 8000
@@ -47,30 +44,24 @@ ZIP_JOBS = {}
 CONNECTED_CLIENTS = {}
 CONFIG_FILE = "settings.json"
 
-# --- HELPER FUNCTIONS ---
-def load_settings():
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, 'r') as f: return json.load(f).get("last_folder", "")
-        except: pass
-    return ""
-
-def save_settings(path):
-    try:
-        with open(CONFIG_FILE, 'w') as f:
-            json.dump({"last_folder": path}, f)
-    except:
-        pass
-
+# --- TRACKING VISITOR (FIXED: Now logs Localhost too) ---
 @app.before_request
 def track_visitor():
     try:
         ip = request.remote_addr
-        if ip != '127.0.0.1':
-            device = request.user_agent.platform or "Browser"
-            CONNECTED_CLIENTS[ip] = {'device': device.capitalize(), 'last_seen': datetime.now().strftime("%H:%M:%S")}
+        # Get Device Info
+        device = request.user_agent.platform
+        if not device: device = "Browser"
+        else: device = device.capitalize()
+        
+        # Log everyone (Removed the 127.0.0.1 filter so you can see yourself)
+        CONNECTED_CLIENTS[ip] = {
+            'device': device,
+            'last_seen': datetime.now().strftime("%H:%M:%S")
+        }
     except: pass
 
+# --- METADATA ENGINE ---
 def parse_movie_name(filename):
     name = os.path.splitext(filename)[0]
     is_tv = bool(re.search(r'\b(S\d+|Season)\b', name, re.IGNORECASE))
@@ -91,12 +82,17 @@ def get_metadata(filename, folder_path, is_folder=False):
     if not os.path.exists(meta_dir): os.makedirs(meta_dir)
     json_path = os.path.join(meta_dir, f"{filename}.json")
     
+    # 1. Check Cache
     if os.path.exists(json_path):
-        try:
-            with open(json_path, 'r') as f:
-                return json.load(f)
-        except:
-            pass
+        try: 
+            with open(json_path, 'r') as f: 
+                data = json.load(f)
+                # If cache is old (missing backdrop), ignore it and fetch again
+                if 'backdrop' in data: return data
+        except: pass
+
+    if not TMDB_API_KEY:
+        return {"title": filename, "poster": None, "year": "", "overview": "", "backdrop": None}
 
     title, year, is_tv_guess = parse_movie_name(filename)
     is_tv = True if is_folder else is_tv_guess
@@ -109,24 +105,34 @@ def get_metadata(filename, folder_path, is_folder=False):
         results = response.get('results')
         if results:
             media = results[0]
-            poster_path = media.get('poster_path')
-            local_poster = None
-            if poster_path:
-                img_url = f"https://image.tmdb.org/t/p/w500{poster_path}"
-                img_data = requests.get(img_url).content
-                img_name = f"{filename}.jpg"
-                with open(os.path.join(meta_dir, img_name), 'wb') as f: f.write(img_data)
-                local_poster = f"/metadata_img/{urllib.parse.quote(os.path.relpath(os.path.join(meta_dir, img_name), SHARED_DIR))}"
             
-            final_title = media.get('name') if is_tv else media.get('title')
-            final_year = (media.get('first_air_date') if is_tv else media.get('release_date'))[:4]
-            data = {"title": final_title, "year": final_year, "poster": local_poster, "rating": media.get('vote_average'), "is_tv": is_tv}
+            def dl_img(path, suffix):
+                if not path: return None
+                try:
+                    url = f"https://image.tmdb.org/t/p/w500{path}"
+                    data = requests.get(url).content
+                    fname = f"{filename}{suffix}.jpg"
+                    with open(os.path.join(meta_dir, fname), 'wb') as f: f.write(data)
+                    return f"/metadata_img/{urllib.parse.quote(os.path.relpath(os.path.join(meta_dir, fname), SHARED_DIR))}"
+                except: return None
+
+            data = {
+                "title": media.get('name') if is_tv else media.get('title'),
+                "year": (media.get('first_air_date') if is_tv else media.get('release_date') or "")[:4],
+                "poster": dl_img(media.get('poster_path'), ""),
+                "backdrop": dl_img(media.get('backdrop_path'), "_bg"),
+                "rating": media.get('vote_average'),
+                "overview": media.get('overview'),
+                "is_tv": is_tv
+            }
             with open(json_path, 'w') as f: json.dump(data, f)
             return data
-    except: pass
-    failed_data = {"title": title, "poster": None, "year": year}
-    with open(json_path, 'w') as f: json.dump(failed_data, f)
-    return failed_data
+    except Exception as e: print(f"Meta Error: {e}")
+    
+    # Fail safe
+    failed = {"title": title, "poster": None, "year": year, "overview": "", "backdrop": None}
+    with open(json_path, 'w') as f: json.dump(failed, f)
+    return failed
 
 def get_size_format(b):
     for unit in ["", "K", "M", "G", "T"]:
@@ -171,6 +177,21 @@ def background_zip_task(job_id, source_dir, temp_dir):
         ZIP_JOBS[job_id].update({'progress': 100, 'status': 'ready', 'filepath': zip_path})
     except: ZIP_JOBS[job_id]['status'] = 'error'
 
+# --- HELPER: Settings ---
+def load_settings():
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r') as f: return json.load(f).get("last_folder", "")
+        except:
+            pass
+    return ""
+def save_settings(path):
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump({"last_folder": path}, f)
+    except:
+        pass
+
 # --- ROUTES ---
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -195,7 +216,7 @@ def index(subpath=""):
         for name in os.listdir(full_path):
             if name.startswith('.'): continue
             f_path = os.path.join(full_path, name)
-            if name.lower().endswith(('.srt', '.vtt', '.json', '.jpg', '.png', '.zip', '.py', '.txt', '.exe')): continue 
+            if name.lower().endswith(('.srt', '.vtt', '.json', '.jpg', '.png', '.zip', '.py', '.txt', '.exe', '.spec')): continue 
             try:
                 stats = os.stat(f_path)
                 is_dir = os.path.isdir(f_path)
@@ -230,6 +251,7 @@ def metadata_api():
 @app.route('/metadata_img/<path:img_rel_path>')
 def serve_poster(img_rel_path): return send_file(os.path.join(SHARED_DIR, img_rel_path))
 
+# --- FIXED PLAY ROUTE (Cleaned up the duplicate code) ---
 @app.route('/play/<path:filepath>')
 @login_required
 def play(filepath):
@@ -238,8 +260,21 @@ def play(filepath):
     encoded_filepath = urllib.parse.quote(filepath)
     vlc_link = f"vlc://{SERVER_URL}/download/{encoded_filepath}"
     stream_url = f"{SERVER_URL}/download/{encoded_filepath}"
-    base_name = os.path.splitext(filename)[0].lower()
+    
+    # Get Metadata
+    meta = get_metadata(filename, directory, is_folder=False)
+    
+    # File Stats
+    try:
+        full_path = os.path.join(SHARED_DIR, filepath)
+        fsize = f"{os.path.getsize(full_path) / (1024 * 1024):.2f} MB"
+    except: fsize = "Unknown"
+    
+    quality = "1080p" if "1080" in filename else "720p" if "720" in filename else "4K" if "2160" in filename else "SD"
+    ext = os.path.splitext(filename)[1].replace('.', '').upper()
+
     subtitles = []
+    base_name = os.path.splitext(filename)[0].lower()
     try:
         for f in os.listdir(directory):
             if f.lower().startswith(base_name) and f.lower().endswith(('.srt', '.vtt')):
@@ -247,7 +282,18 @@ def play(filepath):
                 rel_path = os.path.relpath(os.path.join(directory, f), SHARED_DIR).replace("\\", "/")
                 subtitles.append({"src": f"/download/{rel_path}", "label": label, "lang": "en"})
     except: pass
-    return render_template('player.html', filepath=filepath, filename=filename, file_id=filename.replace(" ","_"), subtitles=subtitles, vlc_link=vlc_link, stream_url=stream_url)
+    
+    return render_template('player.html', 
+                           filepath=filepath, 
+                           filename=filename, 
+                           file_id=filename.replace(" ","_"), 
+                           subtitles=subtitles, 
+                           vlc_link=vlc_link, 
+                           stream_url=stream_url, 
+                           meta=meta, 
+                           file_size=fsize, 
+                           quality=quality, 
+                           container=ext)
 
 @app.route('/download/<path:filename>')
 @login_required
@@ -282,161 +328,90 @@ def download_zip_result(job_id):
         return response
     return send_file(fp, as_attachment=True)
 
-
-# --- NEW MODERN UI CLASS ---
+# --- UI CLASS ---
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
 class ModernMovieApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        
-        self.title("Smart Media Server")
+        self.title("Smart Movie Server")
         self.geometry("750x500")
-        
         self.icon_path = os.path.join("static", "favicon.ico")
-        if os.path.exists(self.icon_path):
-            self.iconbitmap(self.icon_path)
-
+        if os.path.exists(self.icon_path): self.iconbitmap(self.icon_path)
         self.protocol('WM_DELETE_WINDOW', self.minimize_to_tray)
+        self.grid_columnconfigure(1, weight=1); self.grid_rowconfigure(0, weight=1)
 
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(0, weight=1)
-
-        # --- SIDEBAR ---
         self.sidebar = ctk.CTkFrame(self, width=220, corner_radius=0)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
-        
         ctk.CTkLabel(self.sidebar, text="🎬 MEDIA SERVER", font=("Arial", 20, "bold"), text_color="#e50914").pack(pady=30)
         
         ctk.CTkLabel(self.sidebar, text="Source Folder:", anchor="w").pack(padx=20, pady=(10,0), anchor="w")
-        self.btn_select = ctk.CTkButton(self.sidebar, text="Browse Folder", command=self.select_folder, fg_color="#333", border_width=1, border_color="#555")
-        self.btn_select.pack(padx=20, pady=5)
-        self.lbl_path = ctk.CTkLabel(self.sidebar, text="None selected", text_color="gray", font=("Arial", 10), wraplength=180)
-        self.lbl_path.pack(padx=20)
+        self.btn_select = ctk.CTkButton(self.sidebar, text="Browse Folder", command=self.select_folder, fg_color="#333", border_width=1, border_color="#555"); self.btn_select.pack(padx=20, pady=5)
+        self.lbl_path = ctk.CTkLabel(self.sidebar, text="None", text_color="gray", font=("Arial", 10), wraplength=180); self.lbl_path.pack(padx=20)
         
         ctk.CTkLabel(self.sidebar, text="Security PIN:", anchor="w").pack(padx=20, pady=(20,0), anchor="w")
-        self.entry_pin = ctk.CTkEntry(self.sidebar, show="*", placeholder_text="Optional")
-        self.entry_pin.pack(padx=20, pady=5)
+        self.entry_pin = ctk.CTkEntry(self.sidebar, show="*", placeholder_text="Optional"); self.entry_pin.pack(padx=20, pady=5)
 
-        self.btn_start = ctk.CTkButton(self.sidebar, text="▶ Start Server", command=self.run_server, fg_color="#28a745", hover_color="#218838", state="disabled")
-        self.btn_start.pack(padx=20, pady=(30, 10))
-        
-        self.btn_stop = ctk.CTkButton(self.sidebar, text="⏹ Stop & Exit", command=self.stop_server, fg_color="#dc3545", hover_color="#c82333", state="disabled")
-        self.btn_stop.pack(padx=20, pady=5)
+        self.btn_start = ctk.CTkButton(self.sidebar, text="▶ Start Server", command=self.run_server, fg_color="#28a745", hover_color="#218838", state="disabled"); self.btn_start.pack(padx=20, pady=(30, 10))
+        self.btn_stop = ctk.CTkButton(self.sidebar, text="⏹ Stop & Exit", command=self.stop_server, fg_color="#dc3545", hover_color="#c82333", state="disabled"); self.btn_stop.pack(padx=20, pady=5)
 
-        # --- MAIN AREA ---
         self.main_area = ctk.CTkFrame(self, fg_color="transparent")
         self.main_area.grid(row=0, column=1, sticky="nsew", padx=20, pady=20)
+        
+        self.status_frame = ctk.CTkFrame(self.main_area, fg_color="#222"); self.status_frame.pack(fill="x", pady=10)
+        self.lbl_status = ctk.CTkLabel(self.status_frame, text="Status: Offline", font=("Arial", 14), text_color="#888"); self.lbl_status.pack(pady=10)
 
-        self.status_frame = ctk.CTkFrame(self.main_area, fg_color="#222")
-        self.status_frame.pack(fill="x", pady=10)
-        self.lbl_status = ctk.CTkLabel(self.status_frame, text="Status: Offline", font=("Arial", 14), text_color="#888")
-        self.lbl_status.pack(pady=10)
+        self.url_frame = ctk.CTkFrame(self.main_area, fg_color="transparent"); self.url_frame.pack(fill="x", pady=10)
+        self.entry_url = ctk.CTkEntry(self.url_frame, placeholder_text="Waiting...", width=300); self.entry_url.pack(side="left", padx=(0, 10))
+        self.btn_copy = ctk.CTkButton(self.url_frame, text="Copy Link", width=80, command=self.copy_link, state="disabled"); self.btn_copy.pack(side="left")
 
-        self.url_frame = ctk.CTkFrame(self.main_area, fg_color="transparent")
-        self.url_frame.pack(fill="x", pady=10)
-        self.entry_url = ctk.CTkEntry(self.url_frame, placeholder_text="Waiting for server...", width=300)
-        self.entry_url.pack(side="left", padx=(0, 10))
-        self.btn_copy = ctk.CTkButton(self.url_frame, text="Copy Link", width=80, command=self.copy_link, state="disabled")
-        self.btn_copy.pack(side="left")
-
-        self.qr_label = ctk.CTkLabel(self.main_area, text="")
-        self.qr_label.pack(pady=10)
+        self.qr_label = ctk.CTkLabel(self.main_area, text=""); self.qr_label.pack(pady=10)
 
         ctk.CTkLabel(self.main_area, text="Connected Devices (Live Log)", anchor="w", font=("Arial", 12, "bold")).pack(fill="x", pady=(10,5))
-        self.client_box = ctk.CTkTextbox(self.main_area, height=100, text_color="#ccc")
-        self.client_box.pack(fill="x")
-        self.client_box.configure(state="disabled")
+        self.client_box = ctk.CTkTextbox(self.main_area, height=100, text_color="#ccc"); self.client_box.pack(fill="x"); self.client_box.configure(state="disabled")
 
         saved_path = load_settings()
         if saved_path and os.path.exists(saved_path):
-            global SHARED_DIR
-            SHARED_DIR = saved_path
-            self.lbl_path.configure(text=f"...{SHARED_DIR[-25:]}")
-            self.btn_start.configure(state="normal")
-            self.lbl_status.configure(text="Status: Ready to Start", text_color="#00aaff")
-
+            global SHARED_DIR; SHARED_DIR = saved_path; self.lbl_path.configure(text=f"...{SHARED_DIR[-25:]}"); self.btn_start.configure(state="normal"); self.lbl_status.configure(text="Status: Ready", text_color="#00aaff")
+        
         self.update_monitor()
 
     def select_folder(self):
-        global SHARED_DIR
-        path = filedialog.askdirectory()
-        if path:
-            SHARED_DIR = os.path.abspath(path)
-            self.lbl_path.configure(text=f"...{SHARED_DIR[-25:]}")
-            save_settings(SHARED_DIR)
-            self.btn_start.configure(state="normal")
-            self.lbl_status.configure(text="Status: Ready", text_color="#00aaff")
+        global SHARED_DIR; path = filedialog.askdirectory()
+        if path: SHARED_DIR = os.path.abspath(path); self.lbl_path.configure(text=f"...{SHARED_DIR[-25:]}"); save_settings(SHARED_DIR); self.btn_start.configure(state="normal"); self.lbl_status.configure(text="Status: Ready", text_color="#00aaff")
 
     def run_server(self):
-        global SERVER_URL, SERVER_PIN
-        SERVER_PIN = self.entry_pin.get().strip()
-        
+        global SERVER_URL, SERVER_PIN; SERVER_PIN = self.entry_pin.get().strip()
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try: s.connect(("8.8.8.8", 80)); ip = s.getsockname()[0]
         except: ip = "127.0.0.1"
         finally: s.close()
-        
         SERVER_URL = f"http://{ip}:{PORT}"
-        
-        t = threading.Thread(target=lambda: app.run(host='0.0.0.0', port=PORT, use_reloader=False), daemon=True)
-        t.start()
-        
-        self.btn_start.configure(state="disabled", text="Running...")
-        self.btn_select.configure(state="disabled")
-        self.entry_pin.configure(state="disabled")
-        self.btn_stop.configure(state="normal")
-        self.btn_copy.configure(state="normal")
-        
-        self.entry_url.delete(0, "end")
-        self.entry_url.insert(0, SERVER_URL)
-        
-        self.lbl_status.configure(text="✅ Server is Live!", text_color="#28a745")
-        
-        qr = qrcode.QRCode(box_size=8, border=2)
-        qr.add_data(SERVER_URL)
-        qr.make(fit=True)
-        img = qr.make_image(fill_color="black", back_color="white").resize((150, 150), Image.Resampling.LANCZOS)
-        self.tk_qr_img = ctk.CTkImage(light_image=img, dark_image=img, size=(150,150))
-        self.qr_label.configure(image=self.tk_qr_img)
+        threading.Thread(target=lambda: app.run(host='0.0.0.0', port=PORT, use_reloader=False), daemon=True).start()
+        self.btn_start.configure(state="disabled", text="Running..."); self.btn_select.configure(state="disabled"); self.entry_pin.configure(state="disabled"); self.btn_stop.configure(state="normal"); self.btn_copy.configure(state="normal")
+        self.entry_url.delete(0, "end"); self.entry_url.insert(0, SERVER_URL); self.lbl_status.configure(text="✅ Server is Live!", text_color="#28a745")
+        qr = qrcode.QRCode(box_size=8, border=2); qr.add_data(SERVER_URL); qr.make(fit=True); img = qr.make_image(fill_color="black", back_color="white").resize((150, 150), Image.Resampling.LANCZOS)
+        self.tk_qr_img = ctk.CTkImage(light_image=img, dark_image=img, size=(150,150)); self.qr_label.configure(image=self.tk_qr_img)
 
-    def stop_server(self):
-        self.quit_app()
-
-    def copy_link(self):
-        self.clipboard_clear()
-        self.clipboard_append(SERVER_URL)
-        self.lbl_status.configure(text="✅ Link Copied!", text_color="#28a745")
-
+    def stop_server(self): self.quit_app()
+    def copy_link(self): self.clipboard_clear(); self.clipboard_append(SERVER_URL); self.lbl_status.configure(text="✅ Link Copied!", text_color="#28a745")
     def update_monitor(self):
-        self.client_box.configure(state="normal")
-        self.client_box.delete("0.0", "end")
-        if not CONNECTED_CLIENTS:
-            self.client_box.insert("0.0", "Waiting for connections...")
+        self.client_box.configure(state="normal"); self.client_box.delete("0.0", "end")
+        if not CONNECTED_CLIENTS: self.client_box.insert("0.0", "Waiting for connections...\n(Try connecting with your phone)")
         else:
-            text = ""
-            for ip, info in CONNECTED_CLIENTS.items():
-                text += f"[{info['last_seen']}] {info['device']} ({ip})\n"
-            self.client_box.insert("0.0", text)
-        self.client_box.configure(state="disabled")
-        self.after(2000, self.update_monitor)
-
+            txt = ""
+            for ip, info in CONNECTED_CLIENTS.items(): txt += f"[{info['last_seen']}] {info['device']} ({ip})\n"
+            self.client_box.insert("0.0", txt)
+        self.client_box.configure(state="disabled"); self.after(2000, self.update_monitor)
     def minimize_to_tray(self):
         self.withdraw()
         image = Image.open(self.icon_path) if os.path.exists(self.icon_path) else Image.new('RGB', (64, 64), 'red')
-        menu = (item('Open', self.show_window), item('Stop & Exit', self.quit_app))
-        self.tray_icon = pystray.Icon("name", image, "Movie Server", menu)
-        self.tray_icon.run()
-
-    def show_window(self, icon, item):
-        self.tray_icon.stop()
-        self.after(0, self.deiconify)
-
-    def quit_app(self, icon=None, item=None):
+        self.tray_icon = pystray.Icon("name", image, "Movie Server", (item('Open', self.show_window), item('Stop & Exit', self.quit_app))); self.tray_icon.run()
+    def show_window(self, icon, item): self.tray_icon.stop(); self.after(0, self.deiconify)
+    def quit_app(self, icon=None, item=None): 
         if hasattr(self, 'tray_icon'): self.tray_icon.stop()
-        self.destroy()
-        os._exit(0)
+        self.destroy(); os._exit(0)
 
 if __name__ == "__main__":
     app_gui = ModernMovieApp()
