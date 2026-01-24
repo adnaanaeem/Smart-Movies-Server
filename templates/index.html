@@ -1,10 +1,38 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Media Server</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Movie Library</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+    
+    <!-- PWA MANIFEST -->
+    <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
+    
+    <!-- iOS SUPPORT -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Movies">
+    <link rel="apple-touch-icon" href="{{ url_for('static', filename='favicon.ico') }}">
+
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
     <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
+    
+    <!-- TV NAVIGATION STYLES -->
+    <style>
+        /* Highlight the selected movie on TV Remote/Keyboard */
+        .movie-item:focus {
+            outline: none;
+            border: 3px solid #e50914; /* Red Border */
+            transform: scale(1.05);
+            box-shadow: 0 0 20px rgba(229, 9, 20, 0.6);
+            z-index: 50;
+        }
+        
+        /* Make buttons focusable too */
+        .btn:focus, input:focus {
+            outline: 2px solid #e50914;
+            background: #333;
+        }
+    </style>
 </head>
 <body>
     <div class="top-nav">
@@ -238,6 +266,48 @@
         if(e.target == document.getElementById('zipModal')) closeZipModal();
         if(e.target == document.getElementById('aboutModal')) closeAbout();
     }
+
+    // --- TV / KEYBOARD NAVIGATION ---
+    document.addEventListener('keydown', function(e) {
+        // Only handle Arrow Keys
+        if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) return;
+        
+        e.preventDefault(); // Stop page scrolling
+        
+        const focusable = Array.from(document.querySelectorAll('.movie-item:not([style*="display: none"]), .btn, input'));
+        const current = document.activeElement;
+        const index = focusable.indexOf(current);
+        
+        // If nothing is focused, start at the first item
+        if (index === -1) {
+            if(focusable.length > 0) focusable[0].focus();
+            return;
+        }
+
+        // GRID CALCULATION
+        // We need to know how many items are in a row to calculate "Up" and "Down"
+        let columns = 1;
+        if(focusable[0].classList.contains('movie-item')) {
+            const gridStyle = window.getComputedStyle(document.getElementById('movieGrid'));
+            const colWidth = focusable[0].offsetWidth; // Width of one card
+            const gridWidth = document.getElementById('movieGrid').offsetWidth;
+            const gap = 20; // from your CSS gap
+            columns = Math.floor((gridWidth + gap) / (colWidth + gap));
+        }
+
+        let nextIndex = index;
+
+        if (e.key === 'ArrowRight') nextIndex = index + 1;
+        if (e.key === 'ArrowLeft') nextIndex = index - 1;
+        if (e.key === 'ArrowUp') nextIndex = index - columns;
+        if (e.key === 'ArrowDown') nextIndex = index + columns;
+
+        // Boundary Checks
+        if (nextIndex >= 0 && nextIndex < focusable.length) {
+            focusable[nextIndex].focus();
+            focusable[nextIndex].scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+    });
 </script>
 </body>
 </html>
