@@ -9,7 +9,8 @@ from datetime import datetime
 from functools import wraps
 
 from flask import render_template, send_from_directory, send_file, abort, request, jsonify, after_this_request, session, redirect, url_for
-from app import app
+from flask_socketio import join_room, leave_room
+from app import app, socketio
 from app.services import ServerConfig, get_metadata, get_size_format, background_zip_task
 
 # --- HELPER DECORATOR ---
@@ -24,6 +25,31 @@ def login_required(f):
 # --- ROUTES ---
 @app.before_request
 def track_visitor():
+    try:
+        ip = request.remote_addr
+        ua_string = request.headers.get('User-Agent', '')
+        user_agent = parse(ua_string) # <-- Use the new library here
+        
+        # Format the OS and Browser information nicely
+        os_info = f"{user_agent.os.family} {user_agent.os.version_string}".strip()
+        browser_info = f"{user_agent.browser.family} {user_agent.browser.version_string}".strip()
+        
+        # Determine the general device type
+        if user_agent.is_mobile: device_type = "Phone"
+        elif user_agent.is_tablet: device_type = "Tablet"
+        elif user_agent.is_pc: device_type = "PC"
+        elif user_agent.is_bot: device_type = "Bot"
+        else: device_type = "Other"
+
+        # Store all this new information
+        ServerConfig.CONNECTED_CLIENTS[ip] = {
+            'device_type': device_type,
+            'os': os_info,
+            'browser': browser_info,
+            'last_seen': datetime.now().strftime("%H:%M:%S")
+        }
+    except Exception as e:
+        print(f"Error tracking visitor: {e}")
     try:
         ip = request.remote_addr
         device = request.user_agent.platform
@@ -208,3 +234,19 @@ def my_list():
                 })
 
     return render_template('my_list.html', items=favorited_items)
+
+# --- WATCH PARTY SOCKET.IO HANDLERS ---
+
+@socketio.on('join_room')
+def handle_join_room(data):
+    """Client joins a room for a specific movie party."""
+    room = data['room']
+    join_room(room)
+    print(f"Client joined room: {room}")
+
+@socketio.on('player_event')
+def handle_player_event(data):
+    """Handles receiving an event from one client and broadcasting to others."""
+    room = data['room']
+    # Broadcast to all other clients in the room, but not the sender
+    socketio.emit('server_event', data, to=room, include_self=False)

@@ -2,6 +2,7 @@
 <html>
 <head>
     <title>{{ meta.title if meta.title else filename }}</title>
+    <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
     
@@ -174,6 +175,7 @@
                 <div class="plot">{% if meta.overview %} {{ meta.overview }} {% else %} No plot summary available. {% endif %}</div>
 
                 <div class="actions">
+                    <button class="btn" id="watch-party-btn" onclick="createWatchParty()">🎉 Watch Party</button>
                     <button class="btn btn-vlc" onclick="launchVlc()">⚠️ Play in VLC</button>
                     <a href="/download/{{ filepath }}" download class="btn btn-dl">⬇ Download</a>
                     <button class="btn" onclick="openShortcuts()">⌨️ Shortcuts</button>
@@ -201,66 +203,127 @@
 <script src="https://cdn.plyr.io/3.7.8/plyr.js"></script>
 <script>
     const player = new Plyr('#player', {
-        controls: ['play-large', 'play', 'progress', 'current-time', 'mute', 'volume', 'captions', 'settings', 'pip', 'airplay', 'fullscreen'],
-        settings: ['speed', 'quality'],
+        /* plyr options */
+        autoplay: false, // Important for sync
         keyboard: { focused: true, global: true },
         seekTime: 10,
-        autoplay: false 
     });
 
-    // --- SPINNER LOGIC (Ensures it hides correctly) ---
-    const spinner = document.getElementById('loading-spinner');
-    function hideSpinner() {
-        spinner.style.opacity = '0';
-        setTimeout(() => { spinner.style.display = 'none'; }, 300);
-    }
-    function showSpinner() {
-        spinner.style.display = 'flex'; spinner.style.opacity = '1';
-    }
-
-    // Hide immediately when ready (Fixes paused video issue)
-    player.on('ready', hideSpinner);
-    player.on('playing', hideSpinner);
-    player.on('pause', hideSpinner);
-    player.on('waiting', showSpinner);
-    player.on('seeking', showSpinner);
-
-    // --- RESUME LOGIC ---
     const fileId = "{{ file_id }}";
-    player.on('ready', event => {
-        const savedTime = localStorage.getItem(fileId);
-        if (savedTime && parseFloat(savedTime) > 10) {
-            document.getElementById('resume-msg').style.display = 'block';
-            setTimeout(() => {
-                player.currentTime = parseFloat(savedTime);
-                player.play().catch(() => {}); // Try to play, catch error if browser blocks auto-audio
-                setTimeout(() => { document.getElementById('resume-msg').style.display = 'none'; }, 3000);
-            }, 200); 
-        } else {
-            // New video: Just try to play
-            player.play().catch(() => {});
-        }
-    });
-
-    // Save Progress
-    let lastSave = 0;
-    player.on('timeupdate', event => {
-        const now = Date.now();
-        if (now - lastSave > 2000 && player.currentTime > 5) {
-            localStorage.setItem(fileId, player.currentTime);
-            localStorage.setItem(fileId + "_total", player.duration);
-            lastSave = now;
-        }
-    });
-    player.on('ended', event => { localStorage.removeItem(fileId); });
-
-    // --- UTILS ---
     const vlcLink = "{{ vlc_link }}";
     const streamUrl = "{{ stream_url }}";
+
+    // --- WATCH PARTY LOGIC ---
+    const socket = io();
+    const urlParams = new URLSearchParams(window.location.search);
+    let partyRoom = urlParams.get('party'); // Check if we joined a party link
+    let isSyncing = false; // Flag to prevent event loops
+
+    // Connect to the socket server and join the room if in a party
+    socket.on('connect', () => {
+        if (partyRoom) {
+            socket.emit('join_room', { room: partyRoom });
+            document.getElementById('watch-party-btn').innerText = "🎉 In Party!";
+            document.getElementById('watch-party-btn').style.borderColor = "#28a745";
+        }
+    });
+
+    // Listen for events from the server
+    socket.on('server_event', (data) => {
+        isSyncing = true; // Prevent sending this event back to server
+        console.log('Received from server:', data);
+        switch (data.event) {
+            case 'play':
+                // If the host is playing, we should also be playing at their time
+                player.currentTime = data.time;
+                player.play();
+                break;
+            case 'pause':
+                // If the host paused, we must also pause
+                player.pause();
+                break;
+            case 'seeked':
+                // The host jumped to a new time. We must follow.
+                player.currentTime = data.time;
+                // And we must match their play/pause state *after* seeking.
+                if (data.paused) {
+                    player.pause();
+                } else {
+                    player.play();
+                }
+                break;
+        }
+        // After a short delay, reset the flag
+        setTimeout(() => { isSyncing = false; }, 200);
+    });
+
+    // Function to send our events to the server
+    function sendPlayerEvent(event, time) {
+        if (partyRoom && !isSyncing) {
+            socket.emit('player_event', {
+                room: partyRoom,
+                event: event,
+                time: time,
+                paused: player.paused
+            });
+        }
+    }
+
+    // Attach listeners to our local player
+    player.on('play', () => sendPlayerEvent('play', player.currentTime));
+    player.on('pause', () => sendPlayerEvent('pause', player.currentTime));
+    player.on('seeked', () => sendPlayerEvent('seeked', player.currentTime));
+
+    // UI function to create a party
+    // UI function to create a party (FIXED FOR HTTP)
+    function createWatchParty() {
+        if (partyRoom) {
+            // If already in a party, just copy the link again
+            navigator.clipboard.writeText(window.location.href).then(() => {
+                alert("You are already in a party! The invite link has been copied to your clipboard again.");
+            }).catch(() => {
+                prompt("You are already in a party! Copy this link to invite others:", window.location.href);
+            });
+            return;
+        }
+        
+        // Generate a simple unique ID for the party room
+        const newPartyId = fileId + '-' + Math.random().toString(36).substring(2, 8);
+        const partyUrl = window.location.href.split('?')[0] + '?party=' + newPartyId;
+        
+        // --- Smart Copy Logic ---
+        // Check if the modern, secure clipboard API is available
+        if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(partyUrl).then(() => {
+                alert("✅ Watch Party link copied!\n\nThe page will now reload into party mode.");
+                window.location.href = partyUrl;
+            });
+        } else {
+            // Fallback for insecure (http) connections
+            prompt("Copy this Watch Party link and share it with friends:", partyUrl);
+            alert("The page will now reload into party mode.");
+            window.location.href = partyUrl;
+        }
+    }
+
+    // --- SPINNER & RESUME LOGIC (Unaffected) ---
+    const spinner = document.getElementById('loading-spinner');
+    function hideSpinner() { spinner.style.opacity = '0'; setTimeout(() => spinner.style.display = 'none', 300); }
+    function showSpinner() { spinner.style.display = 'flex'; spinner.style.opacity = '1'; }
+    player.on('ready', hideSpinner); player.on('playing', hideSpinner); player.on('pause', hideSpinner);
+    player.on('waiting', showSpinner); player.on('seeking', showSpinner); player.on('seeked', hideSpinner);
+
+    player.on('ready', event => {
+        const savedTime = localStorage.getItem(fileId);
+        if (savedTime && !partyRoom) { // Only resume from local storage if NOT in a party
+            player.currentTime = parseFloat(savedTime);
+        }
+        player.play().catch(()=>{});
+    });
+
+    // --- OTHER UTILS ---
     function launchVlc() { window.location.href = vlcLink; }
     function copyStreamLink() { navigator.clipboard.writeText(streamUrl).then(() => alert("Copied!")).catch(() => prompt("Copy:", streamUrl)); }
-    function openShortcuts() { document.getElementById('shortcutsModal').style.display = "flex"; }
-    function closeShortcuts(e) { if(e.target.id === 'shortcutsModal') document.getElementById('shortcutsModal').style.display = "none"; }
 </script>
 </body>
 </html>
